@@ -5,10 +5,127 @@ import * as path from 'path';
 const MODE = process.env.MODE || 'test';
 const API_NAME = process.env.API_NAME || 'default';
 const API_KEY = process.env.API_KEY || '';
+const COMPARE_UNORDERED_PATHS = process.env.COMPARE_UNORDERED_PATHS || '';
+const COMPARE_SORT_KEYS = process.env.COMPARE_SORT_KEYS || '';
 
 const BASE_URL = MODE === 'record-old'
   ? process.env.OLD_BASE_URL
   : process.env.NEW_BASE_URL;
+
+const unorderedArrayPaths = new Set(
+  COMPARE_UNORDERED_PATHS
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean),
+);
+
+type SortKeyMap = Record<string, string[]>;
+
+function parseSortKeyMap(raw: string): SortKeyMap {
+  if (!raw.trim()) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.warn('COMPARE_SORT_KEYS は {"$.path":["key"]} 形式のJSONを指定してください。');
+      return {};
+    }
+
+    const result: SortKeyMap = {};
+    for (const [pathKey, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value)) {
+        continue;
+      }
+      const normalizedKeys = value
+        .filter((item) => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (normalizedKeys.length > 0) {
+        result[pathKey] = normalizedKeys;
+      }
+    }
+    return result;
+  } catch {
+    console.warn('COMPARE_SORT_KEYS のJSON解析に失敗したため、ソートキー指定なしで比較します。');
+    return {};
+  }
+}
+
+const sortKeysByPath = parseSortKeyMap(COMPARE_SORT_KEYS);
+
+function comparePrimitive(a: unknown, b: unknown): number {
+  const aText = a === undefined ? '' : JSON.stringify(a);
+  const bText = b === undefined ? '' : JSON.stringify(b);
+
+  if (aText < bText) {
+    return -1;
+  }
+  if (aText > bText) {
+    return 1;
+  }
+  return 0;
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const pairs = keys.map((key) => `${JSON.stringify(key)}:${stableStringify(obj[key])}`);
+  return `{${pairs.join(',')}}`;
+}
+
+function compareArrayItems(a: unknown, b: unknown, sortKeys: string[]): number {
+  if (sortKeys.length > 0 && a && b && typeof a === 'object' && typeof b === 'object') {
+    const aObj = a as Record<string, unknown>;
+    const bObj = b as Record<string, unknown>;
+
+    for (const key of sortKeys) {
+      const diff = comparePrimitive(aObj[key], bObj[key]);
+      if (diff !== 0) {
+        return diff;
+      }
+    }
+  }
+
+  return comparePrimitive(stableStringify(a), stableStringify(b));
+}
+
+function normalizeForCompare(value: unknown, currentPath = '$'): unknown {
+  if (Array.isArray(value)) {
+    const normalizedItems = value.map((item) => normalizeForCompare(item, `${currentPath}[]`));
+
+    if (!unorderedArrayPaths.has(currentPath)) {
+      return normalizedItems;
+    }
+
+    const sortKeys = sortKeysByPath[currentPath] || [];
+    return [...normalizedItems].sort((a, b) => compareArrayItems(a, b, sortKeys));
+  }
+
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    const normalizedObj: Record<string, unknown> = {};
+
+    for (const key of keys) {
+      const nextPath = currentPath === '$' ? `$.${key}` : `${currentPath}.${key}`;
+      normalizedObj[key] = normalizeForCompare(obj[key], nextPath);
+    }
+
+    return normalizedObj;
+  }
+
+  return value;
+}
 
 function truncateForSingleLine(text: string, maxLength: number): string {
   const normalized = text.replace(/[\r\n\t]+/g, ' ').trim();
@@ -110,7 +227,9 @@ for (const [key, rawValue] of pathEntries) {
         throw new Error(`比較対象のキャプチャファイル（旧API）が存在しません: ${oldFixturePath}\n先に 'npm run old ${API_NAME}' を実行してください。`);
       }
       const expectedJson = JSON.parse(fs.readFileSync(oldFixturePath, 'utf-8'));
-      expect(actualJson).toEqual(expectedJson);
+      const normalizedActualJson = normalizeForCompare(actualJson);
+      const normalizedExpectedJson = normalizeForCompare(expectedJson);
+      expect(normalizedActualJson).toEqual(normalizedExpectedJson);
     }
   });
 }
