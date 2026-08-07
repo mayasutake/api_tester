@@ -1,0 +1,23 @@
+{
+  "name": "api-regression-testing",
+  "version": "1.0.0",
+  "description": "CLI-driven API regression testing framework using Playwright",
+  "main": "run-test.js",
+  "scripts": {
+    "old": "node index.js record-old",
+    "new": "node index.js record-new",
+    "test": "node index.js compare",
+    "test:report": "npx playwright show-report"
+  },
+  "keywords": [
+    "playwright",
+    "testing",
+    "api-regression"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "dotenv": "^16.4.5"
+  }
+}
