@@ -12,6 +12,10 @@ const BASE_URL = MODE === 'record-old'
   ? process.env.OLD_BASE_URL
   : process.env.NEW_BASE_URL;
 
+function toRelaxedPath(pathText: string): string {
+  return pathText.replace(/\[\]/g, '');
+}
+
 const unorderedArrayPaths = new Set(
   COMPARE_UNORDERED_PATHS
     .split(',')
@@ -54,6 +58,22 @@ function parseSortKeyMap(raw: string): SortKeyMap {
 }
 
 const sortKeysByPath = parseSortKeyMap(COMPARE_SORT_KEYS);
+
+function hasUnorderedPath(targetPath: string): boolean {
+  if (unorderedArrayPaths.has(targetPath)) {
+    return true;
+  }
+  return unorderedArrayPaths.has(toRelaxedPath(targetPath));
+}
+
+function getSortKeysForPath(targetPath: string): string[] {
+  const strictMatched = sortKeysByPath[targetPath];
+  if (strictMatched && strictMatched.length > 0) {
+    return strictMatched;
+  }
+  const relaxedMatched = sortKeysByPath[toRelaxedPath(targetPath)];
+  return relaxedMatched || [];
+}
 
 function comparePrimitive(a: unknown, b: unknown): number {
   const aText = a === undefined ? '' : JSON.stringify(a);
@@ -103,11 +123,11 @@ function normalizeForCompare(value: unknown, currentPath = '$'): unknown {
   if (Array.isArray(value)) {
     const normalizedItems = value.map((item) => normalizeForCompare(item, `${currentPath}[]`));
 
-    if (!unorderedArrayPaths.has(currentPath)) {
+    if (!hasUnorderedPath(currentPath)) {
       return normalizedItems;
     }
 
-    const sortKeys = sortKeysByPath[currentPath] || [];
+    const sortKeys = getSortKeysForPath(currentPath);
     return [...normalizedItems].sort((a, b) => compareArrayItems(a, b, sortKeys));
   }
 
@@ -119,6 +139,33 @@ function normalizeForCompare(value: unknown, currentPath = '$'): unknown {
     for (const key of keys) {
       const nextPath = currentPath === '$' ? `$.${key}` : `${currentPath}.${key}`;
       normalizedObj[key] = normalizeForCompare(obj[key], nextPath);
+    }
+
+    return normalizedObj;
+  }
+
+  return value;
+}
+
+function normalizeForStorage(value: unknown, currentPath = '$'): unknown {
+  if (Array.isArray(value)) {
+    const normalizedItems = value.map((item) => normalizeForStorage(item, `${currentPath}[]`));
+
+    if (!hasUnorderedPath(currentPath)) {
+      return normalizedItems;
+    }
+
+    const sortKeys = getSortKeysForPath(currentPath);
+    return [...normalizedItems].sort((a, b) => compareArrayItems(a, b, sortKeys));
+  }
+
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const normalizedObj: Record<string, unknown> = {};
+
+    for (const key of Object.keys(obj)) {
+      const nextPath = currentPath === '$' ? `$.${key}` : `${currentPath}.${key}`;
+      normalizedObj[key] = normalizeForStorage(obj[key], nextPath);
     }
 
     return normalizedObj;
@@ -215,11 +262,13 @@ for (const [key, rawValue] of pathEntries) {
       // record-old: 旧APIを保存
       // record-new: 新APIを保存
       fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
-      fs.writeFileSync(fixturePath, JSON.stringify(actualJson, null, 2));
+      const normalizedForStorage = normalizeForStorage(actualJson);
+      fs.writeFileSync(fixturePath, JSON.stringify(normalizedForStorage, null, 2));
     } else if (MODE === 'compare') {
       // compare: 新APIを保存して旧APIと比較
       fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
-      fs.writeFileSync(fixturePath, JSON.stringify(actualJson, null, 2));
+      const normalizedForStorage = normalizeForStorage(actualJson);
+      fs.writeFileSync(fixturePath, JSON.stringify(normalizedForStorage, null, 2));
       
       // 旧APIのレコードと比較
       const oldFixturePath = path.join(__dirname, 'fixtures', 'old', API_NAME, safeSectionName, safeFileName);
